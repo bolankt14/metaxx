@@ -55,6 +55,19 @@ label { display:flex; flex-direction:column; gap:4px; font-size:.85rem; color:va
 .wallet-info { display:flex; flex-direction:column; font-size:.85rem; }
 footer { color:var(--muted); font-size:.85rem; border-top:1px solid var(--line); padding-top:12px; }
 footer a { color:var(--accent); }
+.steps { list-style:none; margin:12px 0; padding:0; display:flex; flex-direction:column; gap:10px; }
+.steps li { border:1px solid var(--line); border-radius:10px; padding:10px 12px; background:#12141a; }
+.step-state { font-size:.85rem; font-weight:600; padding:2px 8px; border-radius:999px; background:#232833; }
+.step-state.done { background:#14532d; color:#4cc38a; }
+.step-state.running { background:#3a2f10; color:#f5b544; }
+.step-state.error { background:#4c1d1d; color:#f26d6d; }
+.step-state.pending { background:#232833; color:var(--muted); }
+.step-out { margin-top:8px; }
+.step-out table { border-collapse:collapse; width:100%; }
+.step-out td, .step-out th { text-align:left; padding:4px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+.step-out td:first-child { color:var(--muted); white-space:nowrap; }
+.ql-logo-preview { width:96px; height:96px; border-radius:16px; object-fit:cover; box-shadow:0 0 18px rgba(124,58,237,.4); }
+input[type=file] { padding:6px; }
 @media (max-width:600px) {
   .topbar { position:static; }
   main { padding:10px; }

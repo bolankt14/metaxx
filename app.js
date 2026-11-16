@@ -731,6 +731,251 @@ $("btn-fee-load").addEventListener("click", async () => {
   } catch (e) { out.innerHTML = `<p class="err">${esc(errText(e))}</p>`; }
 });
 
+// ---------------------------------------------------------------- Quick Launch (guided: preview -> Config -> token -> wrap -> buy)
+// Same SDK calls as the manual sections above, chained into one guided flow.
+// Every write is still a separate wallet confirmation: no transaction is sent
+// until the user clicks that step's button and confirms in their own wallet.
+const QL_SUPPLY_TOKENS = "1000000";
+const QL_CREATOR_BPS = 7000;
+let ql = { plan: null, name: "", symbol: "", capitalRaw: 0n, tokenDecimals: 9, configId: null, configHash: null, token: null, curve: null, logoDataUri: null, symbolDirty: false };
+
+function b64encodeUnicode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) bin += String.fromCharCode(...bytes.subarray(i, i + CH));
+  return btoa(bin);
+}
+function qlMetadataURI(name, symbol) {
+  const meta = { name, symbol };
+  if (ql.logoDataUri) meta.image = ql.logoDataUri;
+  else {
+    const url = $("ql-logo-url").value.trim();
+    if (url) {
+      if (!/^(https?:\/\/|ipfs:\/\/)/i.test(url)) throw new Error("Logo URL harus diawali https:// atau ipfs://");
+      meta.image = url;
+    }
+  }
+  return "data:application/json;base64," + b64encodeUnicode(JSON.stringify(meta));
+}
+function qlSetStep(step, state, note) {
+  const el = $(`ql-st-${step}`);
+  el.textContent = note ?? state;
+  el.className = `step-state ${state}`;
+}
+$("ql-name").addEventListener("input", () => {
+  if (ql.symbolDirty) return;
+  $("ql-symbol").value = $("ql-name").value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 10);
+});
+$("ql-symbol").addEventListener("input", () => { ql.symbolDirty = true; });
+$("ql-logo-file").addEventListener("change", () => {
+  const f = $("ql-logo-file").files?.[0];
+  const note = $("ql-logo-note"), prev = $("ql-logo-preview");
+  ql.logoDataUri = null; prev.hidden = true; prev.src = "";
+  if (!f) { note.textContent = ""; return; }
+  if (!f.type.startsWith("image/")) { note.innerHTML = `<span class="err">File harus gambar.</span>`; return; }
+  if (f.size > 1024 * 1024) { note.innerHTML = `<span class="err">Logo terlalu besar (&gt;1 MB) — metadata on-chain jadi mahal. Pakai gambar lebih kecil atau URL.</span>`; return; }
+  note.innerHTML = f.size > 100 * 1024 ? `<span class="warn-t">Logo ${Math.round(f.size / 1024)} KB — akan masuk ke metadata on-chain, gas lebih besar dari biasanya.</span>` : "";
+  const reader = new FileReader();
+  reader.onload = () => { ql.logoDataUri = String(reader.result); prev.src = ql.logoDataUri; prev.hidden = false; };
+  reader.onerror = () => { note.innerHTML = `<span class="err">Gagal membaca file logo.</span>`; };
+  reader.readAsDataURL(f);
+});
+async function buildQLPlan() {
+  requireWallet();
+  const name = $("ql-name").value.trim();
+  const symbol = $("ql-symbol").value.trim().toUpperCase();
+  if (!name) throw new Error("Isi nama token dulu.");
+  if (!symbol) throw new Error("Isi symbol token dulu.");
+  const capital = mustAmount($("ql-capital").value, 18, "Modal awal");
+  const block = await latestBlock();
+  const template = await getAmmoraV4ConfigAtBlock(publicClient, REGISTRY, BigInt(TEMPLATE_ID_DEFAULT), block);
+  const tokenDecimals = template.config.tokenDecimals;
+  const saleSupply = mustAmount(QL_SUPPLY_TOKENS, tokenDecimals, "Sale supply");
+  const policy = { schemaVersion: 1, chainId: CHAIN_ID, registry: REGISTRY, templateId: String(TEMPLATE_ID_DEFAULT), templateHash: TEMPLATE_HASH_DEFAULT, configOwner: account, partnerRecipient: account, liquidityPartner: account, leftoverReceiver: account, creatorShareBps: QL_CREATOR_BPS };
+  const plan = planTeamConfig(template, policy, saleSupply, capital);
+  return { plan, name, symbol, capital, tokenDecimals };
+}
+$("btn-ql-start").addEventListener("click", async () => {
+  const status = $("ql-status");
+  try {
+    requireWallet();
+    qlSetStep("preview", "running", "membuat preview…");
+    const { plan, name, symbol, capital, tokenDecimals } = await buildQLPlan();
+    ql.plan = plan; ql.capitalRaw = capital; ql.name = name; ql.symbol = symbol; ql.tokenDecimals = tokenDecimals;
+    const e = plan.economics;
+    $("ql-out-preview").innerHTML = `<table>
+      <tr><td>Token</td><td><strong>${esc(name)} (${esc(symbol)})</strong>, ${tokenDecimals} decimals</td></tr>
+      <tr><td>Modal (threshold)</td><td>${formatUnits(capital, 18)} WETH (${capital} raw)</td></tr>
+      <tr><td>Sale supply</td><td class="mono">${e.saleAllocationRaw} raw (1.000.000 token)</td></tr>
+      <tr><td>Creator share</td><td>${QL_CREATOR_BPS} bps dari fee non-protocol</td></tr>
+      <tr><td>reviewHash</td><td class="mono">${plan.reviewHash}</td></tr>
+      <tr><td>Config owner</td><td>${addrLink(account)}</td></tr>
+    </table>`;
+    qlSetStep("preview", "done", "preview siap ✓");
+    $("btn-ql-create").disabled = false;
+    status.textContent = "Preview siap — cek angkanya, lalu klik Create Config.";
+  } catch (e) { qlSetStep("preview", "error", "gagal"); $("ql-out-preview").innerHTML = `<p class="err">${esc(errText(e))}</p>`; status.textContent = ""; }
+});
+$("btn-ql-create").addEventListener("click", async () => {
+  try {
+    requireWallet();
+    if (!ql.plan) throw new Error("Jalankan preview dulu.");
+    qlSetStep("create", "running", "cek ulang preview…");
+    const fresh = await buildQLPlan();
+    if (fresh.plan.reviewHash.toLowerCase() !== ql.plan.reviewHash.toLowerCase()) throw new Error("reviewHash berubah — input berubah sejak preview. Mulai lagi dari preview.");
+    qlSetStep("create", "running", "konfirmasi di wallet…");
+    const { hash, receipt } = await sendAndWait({ to: ql.plan.transaction.to, data: ql.plan.transaction.data });
+    const created = parseAmmoraV4ConfigCreatedReceipt(receipt, REGISTRY);
+    ql.configId = created.configId; ql.configHash = created.configHash;
+    $("ql-out-create").innerHTML = `<table><tr><td>Config ID</td><td><strong>#${created.configId}</strong></td></tr><tr><td>Config hash</td><td class="mono">${created.configHash}</td></tr><tr><td>Tx</td><td>${txLink(hash)}</td></tr><tr><td>Block</td><td>${receipt.blockNumber}</td></tr></table>`;
+    qlSetStep("create", "done", "Config dibuat ✓");
+    $("btn-ql-create").disabled = true; $("btn-ql-issue").disabled = false;
+    qlSetStep("issue", "pending", "siap");
+  } catch (e) { qlSetStep("create", "error", "gagal"); $("ql-out-create").innerHTML = `<p class="err">${esc(errText(e))}</p>`; }
+});
+$("btn-ql-issue").addEventListener("click", async () => {
+  try {
+    requireWallet();
+    if (!ql.configId) throw new Error("Buat Config dulu.");
+    qlSetStep("issue", "running", "membaca Config…");
+    const block = await latestBlock();
+    const entry = await getAmmoraV4ConfigAtBlock(publicClient, REGISTRY, ql.configId, block);
+    const metadataURI = qlMetadataURI(ql.name, ql.symbol);
+    qlSetStep("issue", "running", `konfirmasi di wallet — poolCreationFee ${formatUnits(entry.config.poolCreationFee, 18)} ETH…`);
+    const tx = buildCreateAmmoraV4Launch({ name: ql.name, symbol: ql.symbol, metadataURI, creatorMetadataURI: metadataURI, tokenDecimals: ql.tokenDecimals }, ql.configId, entry.config.poolCreationFee);
+    const { hash, receipt } = await sendAndWait({ to: FACTORY, data: tx.data, value: tx.value ?? 0n });
+    const created = parseAmmoraV4LaunchCreatedReceipt(receipt, FACTORY);
+    if (created.configId !== ql.configId) throw new Error("Receipt token tidak cocok dengan Config.");
+    ql.token = created.token; ql.curve = created.curve;
+    $("ql-out-issue").innerHTML = `<table><tr><td>Token</td><td>${addrLink(created.token)}</td></tr><tr><td>Curve</td><td>${addrLink(created.curve)}</td></tr><tr><td>Tx</td><td>${txLink(hash)}</td></tr><tr><td>Block</td><td>${receipt.blockNumber}</td></tr></table>`;
+    qlSetStep("issue", "done", "token diterbitkan ✓");
+    $("btn-ql-issue").disabled = true; $("btn-ql-wrap").disabled = false;
+    qlSetStep("wrap", "pending", "siap");
+  } catch (e) { qlSetStep("issue", "error", "gagal"); $("ql-out-issue").innerHTML = `<p class="err">${esc(errText(e))}</p>`; }
+});
+$("btn-ql-wrap").addEventListener("click", async () => {
+  try {
+    requireWallet();
+    qlSetStep("wrap", "running", `konfirmasi di wallet — wrap ${formatUnits(ql.capitalRaw, 18)} ETH…`);
+    const { hash, receipt } = await sendAndWait({ to: WETH, data: encodeFunctionData({ abi: WETH_DEPOSIT_ABI, functionName: "deposit" }), value: ql.capitalRaw });
+    $("ql-out-wrap").innerHTML = `<p>Wrapped ${formatUnits(ql.capitalRaw, 18)} ETH → WETH. ${txLink(hash)} — blok ${receipt.blockNumber}.</p>`;
+    qlSetStep("wrap", "done", "wrapped ✓");
+    $("btn-ql-wrap").disabled = true; $("btn-ql-buy").disabled = false;
+    qlSetStep("buy", "pending", "siap");
+    await refreshBalances();
+  } catch (e) { qlSetStep("wrap", "error", "gagal"); $("ql-out-wrap").innerHTML = `<p class="err">${esc(errText(e))}</p>`; }
+});
+$("btn-ql-buy").addEventListener("click", async () => {
+  try {
+    requireWallet();
+    if (!ql.curve) throw new Error("Terbitkan token dulu.");
+    qlSetStep("buy", "running", "quote buy…");
+    const curve = ql.curve;
+    const block = await latestBlock();
+    const sdk = new AmmoraV4LaunchCurveClient(publicClient, curve, CURVE_CORE);
+    const state = await sdk.getStateAtBlock(block);
+    if (state.status !== 1) throw new Error(`Curve belum aktif (status ${state.status}).`);
+    const amountIn = ql.capitalRaw;
+    const quote = await sdk.quoteExactInputAtBlock(amountIn, false, block);
+    const fill = classifyAmmoraV4ExactInputFill(quote, false);
+    if (fill.kind !== "full" && fill.kind !== "graduation-boundary") throw new Error(`Fill ${fill.kind} — buy dibatalkan.`);
+    const minOut = quote.amountOut * BigInt(10000 - SLIPPAGE_DEFAULT_BPS) / 10000n;
+    if (minOut === 0n) throw new Error("Minimum output nol.");
+    const blockNow = await publicClient.getBlock({ blockNumber: await latestBlock() });
+    const plan = await sdk.planSwapExactInput({ includedAmountIn: amountIn, baseForQuote: false, allowPartialFill: fill.allowPartialFill, slippageBps: SLIPPAGE_DEFAULT_BPS, recipient: account, deadline: blockNow.timestamp + 1800n });
+    qlSetStep("buy", "running", `quote: terima ~${formatUnits(quote.amountOut, ql.tokenDecimals)} ${esc(ql.symbol)} (min ${formatUnits(minOut, ql.tokenDecimals)}) — approval dulu, konfirmasi di wallet…`);
+    const appr = plan.approvalRequirement;
+    const approvalHashes = await ensureApproval(appr.token, appr.spender, appr.amount, appr.resetToZero);
+    qlSetStep("buy", "running", "approval ok — konfirmasi swap di wallet…");
+    const { hash, receipt } = await sendAndWait({ to: plan.transaction.to, data: plan.transaction.data, value: plan.transaction.value ?? 0n });
+    const parsed = parseAmmoraV4SwapReceipt(receipt, curve, { trader: account, recipient: account, baseForQuote: false, requestedAmountIn: amountIn, minimumAmountOut: plan.quote.minimumAmountOut });
+    $("ql-out-buy").innerHTML = `<table><tr><td>Dibayar</td><td>${formatUnits(amountIn, 18)} WETH</td></tr><tr><td>Diterima</td><td><strong>${formatUnits(parsed.amountOut, ql.tokenDecimals)} ${esc(ql.symbol)}</strong></td></tr><tr><td>Tx</td><td>${txLink(hash)}</td></tr><tr><td>Block</td><td>${receipt.blockNumber}</td></tr></table>`;
+    qlSetStep("buy", "done", "buy selesai ✓");
+    $("btn-ql-buy").disabled = true;
+    const done = $("ql-done");
+    done.hidden = false;
+    done.innerHTML = `<h3>🎉 Token kamu sudah live!</h3>
+    <table>
+      <tr><td>Token</td><td>${addrLink(ql.token)}</td></tr>
+      <tr><td>Curve</td><td>${addrLink(ql.curve)}</td></tr>
+      <tr><td>Config</td><td>#${ql.configId}</td></tr>
+      <tr><td>Nama / symbol</td><td>${esc(ql.name)} (${esc(ql.symbol)})</td></tr>
+      <tr><td>Token kamu</td><td>${formatUnits(parsed.amountOut, ql.tokenDecimals)} ${esc(ql.symbol)}</td></tr>
+    </table>
+    <div class="row"><button class="btn" id="btn-ql-trade">Trade / Boost curve ini</button>
+    <button class="btn" id="btn-ql-explore">Lihat di explorer</button></div>`;
+    $("btn-ql-trade").addEventListener("click", () => { $("lookup-curve").value = ql.curve; loadCurve(ql.curve); document.getElementById("trade-card").scrollIntoView({ behavior: "smooth" }); });
+    $("btn-ql-explore").addEventListener("click", () => window.open(`${EXPLORER}/address/${ql.token}`, "_blank"));
+    await refreshBalances();
+  } catch (e) { qlSetStep("buy", "error", "gagal"); $("ql-out-buy").innerHTML = `<p class="err">${esc(errText(e))}</p>`; }
+});
+$("btn-ql-reset").addEventListener("click", () => location.reload());
+
+// ---------------------------------------------------------------- Boost volume (buy -> sell loop on the loaded curve)
+// Testnet only. Each leg is previewed (fresh quote + fill check) and sent only
+// after the user confirms that transaction in their own wallet. Approvals are
+// exact-amount per trade. Total spend per run is capped at 0.05 WETH.
+const BOOST_MAX_TOTAL_WETH = parseUnits("0.05", 18);
+let boost = { running: false, stop: false };
+async function boostCurveSwap(curve, tokenIn, amountIn, baseForQuote, label) {
+  const block = await latestBlock();
+  const sdk = new AmmoraV4LaunchCurveClient(publicClient, curve, CURVE_CORE);
+  const state = await sdk.getStateAtBlock(block);
+  if (state.status !== 1) throw new Error(`Curve tidak aktif (status ${state.status}).`);
+  const quote = await sdk.quoteExactInputAtBlock(amountIn, baseForQuote, block);
+  const fill = classifyAmmoraV4ExactInputFill(quote, baseForQuote);
+  if (fill.kind !== "full") throw new Error(`Fill ${fill.kind} — ${label} dibatalkan (boost hanya jalan kalau fill penuh).`);
+  const minOut = quote.amountOut * BigInt(10000 - SLIPPAGE_DEFAULT_BPS) / 10000n;
+  if (minOut === 0n) throw new Error("Minimum output nol.");
+  const blockNow = await publicClient.getBlock({ blockNumber: await latestBlock() });
+  const plan = await sdk.planSwapExactInput({ includedAmountIn: amountIn, baseForQuote, allowPartialFill: false, slippageBps: SLIPPAGE_DEFAULT_BPS, recipient: account, deadline: blockNow.timestamp + 1800n });
+  const appr = plan.approvalRequirement;
+  const approvalHashes = await ensureApproval(appr.token, appr.spender, appr.amount, appr.resetToZero);
+  const { hash, receipt } = await sendAndWait({ to: plan.transaction.to, data: plan.transaction.data, value: plan.transaction.value ?? 0n });
+  const parsed = parseAmmoraV4SwapReceipt(receipt, curve, { trader: account, recipient: account, baseForQuote, requestedAmountIn: amountIn, minimumAmountOut: plan.quote.minimumAmountOut });
+  return { hash, receipt, amountOut: parsed.amountOut, approvalHashes };
+}
+$("btn-boost-start").addEventListener("click", async () => {
+  const status = $("boost-status"), log = $("boost-log");
+  if (boost.running) return;
+  try {
+    requireWallet();
+    const curve = curveState?.address;
+    if (!curve) throw new Error("Muat dulu sebuah curve (lewat Quick Launch, Explore, atau Trade di bawah).");
+    if (curveState.state.status !== 1) throw new Error(`Curve ${short(curve)} tidak aktif (status ${curveState.state.status}). Boost hanya jalan di curve Active.`);
+    const amount = mustAmount($("boost-amount").value, 18, "Jumlah per trade");
+    const cycles = Number($("boost-cycles").value);
+    if (!Number.isInteger(cycles) || cycles < 1 || cycles > 50) throw new Error("Siklus harus 1–50.");
+    const total = amount * BigInt(cycles);
+    if (total > BOOST_MAX_TOTAL_WETH) throw new Error(`Total belanja ${formatUnits(total, 18)} WETH melebihi batas 0,05 WETH per run — turunkan jumlah per trade atau siklus.`);
+    const wethBal = await publicClient.readContract({ address: WETH, abi: erc20Abi, functionName: "balanceOf", args: [account] });
+    if (wethBal < amount) throw new Error(`Saldo WETH ${formatUnits(wethBal, 18)} kurang dari ${formatUnits(amount, 18)} per trade — wrap dulu di seksi Trade.`);
+    const { state } = curveState;
+    const baseMeta = await tokenMeta(state.baseToken);
+    boost.running = true; boost.stop = false;
+    $("btn-boost-start").disabled = true; $("btn-boost-stop").disabled = false;
+    log.hidden = false;
+    log.innerHTML = `<h3>Boost ${short(curve)} — ${cycles} siklus × ${formatUnits(amount, 18)} WETH</h3>`;
+    let volume = 0n, spent = 0n, gotBack = 0n, doneCycles = 0;
+    for (let i = 1; i <= cycles; i++) {
+      if (boost.stop) { log.innerHTML += `<p class="warn-t">Dihentikan user setelah siklus ${doneCycles}.</p>`; break; }
+      status.textContent = `Siklus ${i}/${cycles}: quote buy…`;
+      const buy = await boostCurveSwap(curve, state.quoteToken, amount, false, `Buy siklus ${i}`);
+      status.textContent = `Siklus ${i}/${cycles}: buy ok — quote sell ${formatUnits(buy.amountOut, baseMeta.decimals)} ${esc(baseMeta.symbol)}…`;
+      const sell = await boostCurveSwap(curve, state.baseToken, buy.amountOut, true, `Sell siklus ${i}`);
+      volume += amount + sell.amountOut; spent += amount; gotBack += sell.amountOut; doneCycles = i;
+      log.innerHTML += `<p><strong>Siklus ${i} ✓</strong> — buy ${formatUnits(amount, 18)} WETH → ${formatUnits(buy.amountOut, baseMeta.decimals)} ${esc(baseMeta.symbol)} ${txLink(buy.hash)} · sell → ${formatUnits(sell.amountOut, 18)} WETH ${txLink(sell.hash)} · volume siklus ${formatUnits(amount + sell.amountOut, 18)} WETH</p>`;
+      status.textContent = `Siklus ${i}/${cycles} selesai — volume sejauh ini ${formatUnits(volume, 18)} WETH.`;
+      await refreshBalances();
+    }
+    log.innerHTML += `<p><strong>Total volume: ${formatUnits(volume, 18)} WETH</strong> — dibelanjakan ${formatUnits(spent, 18)} WETH, kembali ${formatUnits(gotBack, 18)} WETH, selisih (fee/slippage) ${formatUnits(spent - gotBack, 18)} WETH.</p>`;
+    status.innerHTML = `<span class="ok">Boost selesai ✓</span> — total volume ${formatUnits(volume, 18)} WETH (${doneCycles} siklus).`;
+  } catch (e) { status.innerHTML = `<span class="err">${esc(errText(e))}</span>`; }
+  finally { boost.running = false; $("btn-boost-start").disabled = false; $("btn-boost-stop").disabled = true; }
+});
+$("btn-boost-stop").addEventListener("click", () => { boost.stop = true; $("boost-status").textContent = "Stop diminta — berhenti setelah transaksi yang sedang berjalan selesai."; });
+
 // ---------------------------------------------------------------- init
 initNetwork();
 loadCurve(DEMO.curve);
