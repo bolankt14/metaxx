@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metaxx — Ammora Launchpad on GIWA Sepolia</title>
+<link rel="stylesheet" href="./styles.css">
+<script type="importmap">
+{
+  "imports": {
+    "viem": "https://esm.sh/viem@2.33.0",
+    "@ammora-protocol/sdk": "https://esm.sh/@ammora-protocol/sdk@0.3.9?deps=viem@2.33.0"
+  }
+}
+</script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <h1>Metaxx</h1>
+    <p class="sub">Ammora Launchpad on GIWA Sepolia</p>
+  </div>
+  <div class="wallet-box">
+    <span class="badge testnet">GIWA Sepolia Testnet</span>
+    <button id="btn-connect" class="btn primary">Connect Wallet</button>
+    <button id="btn-switch" class="btn" hidden>Switch to GIWA Sepolia</button>
+    <div id="wallet-info" class="wallet-info" hidden>
+      <span id="wallet-addr" class="mono"></span>
+      <span id="wallet-bal"></span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="card" id="status-card">
+    <h2>Network status</h2>
+    <p id="net-status">Loading… (reads live from the public RPC, no wallet needed)</p>
+    <p class="muted">Chain ID 91342 · RPC <span class="mono">https://sepolia-rpc.giwa.io</span> ·
+    Registry <span class="mono">0x6d043014972b87406C4757a5f2d655A24e0b0aF9</span> ·
+    Factory <span class="mono">0x35353a2Dab7426EcCAe6f5FB267702a542ab68fA</span></p>
+    <button id="btn-verify" class="btn">Verify deployment (read-only)</button>
+    <span id="verify-out" class="mono"></span>
+  </section>
+
+  <section class="card" id="explore-card">
+    <h2>Explore launches</h2>
+    <div class="row">
+      <button id="btn-list-configs" class="btn primary">Load latest configs</button>
+      <label>Limit
+        <select id="cfg-limit"><option>10</option><option selected>30</option></select>
+      </label>
+      <span id="cfg-status" class="muted"></span>
+    </div>
+    <div id="cfg-list" class="list"></div>
+    <div id="cfg-detail" class="detail" hidden></div>
+    <h3>Curve / token lookup</h3>
+    <div class="row">
+      <input id="lookup-curve" class="mono grow" placeholder="Curve address 0x…" value="0xCc803Eb81b7Cf3a71dBF17d25E342e45F17be209">
+      <button id="btn-load-kgpt" class="btn">Load demo: KGPT curve</button>
+      <button id="btn-lookup-curve" class="btn primary">Load curve</button>
+    </div>
+    <p class="muted">Demo: Config #25 → token KGPT
+      <span class="mono">0xeFD0b74cB733534D6554894c0FdF5931a711BCFB</span> (9 decimals) →
+      curve <span class="mono">0xCc803E…be209</span> → pool
+      <span class="mono">0xD912Fa18061E5665136AE5dBc002aDa0fc0D3c28</span>.
+      This curve is <strong>Migrated (status 3)</strong> — see Trade below.</p>
+  </section>
+
+  <section class="card" id="trade-card">
+    <h2>Trade</h2>
+    <div id="curve-state" class="detail"><p class="muted">Load a curve above to see its live state.</p></div>
+
+    <div id="trade-route" hidden>
+      <p id="trade-route-note" class="note"></p>
+      <div class="row wrap">
+        <label>Direction
+          <select id="trade-dir"><option value="buy">Buy (pay WETH → receive token)</option><option value="sell">Sell (pay token → receive WETH)</option></select>
+        </label>
+        <label>Amount
+          <input id="trade-amount" type="text" inputmode="decimal" placeholder="0.001">
+        </label>
+        <label>Slippage (bps)
+          <input id="trade-slippage" type="number" value="50" min="0" max="1000">
+        </label>
+        <button id="btn-quote" class="btn">Quote</button>
+      </div>
+      <div id="quote-out" class="detail" hidden></div>
+      <div class="row">
+        <button id="btn-trade" class="btn primary" disabled>Buy / Sell (sign in wallet)</button>
+        <span id="trade-status" class="muted"></span>
+      </div>
+      <p class="muted">Buys must use <strong>WETH</strong> — the native-ETH route is not enabled for this
+      launch factory. Approval is an exact-amount ERC-20 approval in a separate transaction,
+      shown here before the swap is sent. Nothing is sent until you click and confirm in your wallet.</p>
+    </div>
+
+    <div id="migrate-box" hidden>
+      <p class="note">Curve is <strong>ReadyToMigrate (status 2)</strong>. Migration is a separate
+      permissionless transaction after the final fill.</p>
+      <button id="btn-migrate" class="btn primary">Migrate curve → pool</button>
+      <span id="migrate-status" class="muted"></span>
+    </div>
+
+    <h3>Wrap ETH → WETH</h3>
+    <div class="row">
+      <input id="wrap-amount" type="text" inputmode="decimal" placeholder="0.01">
+      <button id="btn-wrap" class="btn">Wrap (sign in wallet)</button>
+      <span id="wrap-status" class="muted"></span>
+    </div>
+    <p class="muted">Sends <span class="mono">WETH.deposit()</span> with ETH value. Keep some ETH for gas.
+    Your WETH balance is shown in the header after connecting.</p>
+  </section>
+
+  <section class="card" id="launch-card">
+    <h2>Launch — create a Config</h2>
+    <p class="muted">Derived from a reviewed template (default #6, Concentrated graduation).
+    The preview step is real and was verified live: it prints a <span class="mono">reviewHash</span>
+    that binds chain, registry and exact calldata — creating requires re-running the preview
+    and matching that hash. No key or funds are used for the preview.</p>
+    <div class="grid">
+      <label>Template Config ID <input id="cfg-template" type="number" value="6" min="1"></label>
+      <label>Template hash <input id="cfg-template-hash" class="mono" value="0x6048908774397e0691bb0e19f72dabb790eb0d892d6081d3622b39e7f738e667"></label>
+      <label>Config owner <input id="cfg-owner" class="mono" placeholder="0x… (defaults to connected wallet)"></label>
+      <label>Partner recipient (fee claimer) <input id="cfg-partner" class="mono" placeholder="0x…"></label>
+      <label>Liquidity partner (LP share) <input id="cfg-lp" class="mono" placeholder="0x…"></label>
+      <label>Leftover receiver <input id="cfg-leftover" class="mono" placeholder="0x…"></label>
+      <label>Sale supply (tokens, human units) <input id="cfg-supply" type="text" value="1000000"></label>
+      <label>Quote threshold (WETH, human units) <input id="cfg-threshold" type="text" value="0.001"></label>
+      <label>Creator share of non-protocol fees (bps, 0–10000) <input id="cfg-creator-bps" type="number" value="7000" min="0" max="10000"></label>
+    </div>
+    <div class="row">
+      <button id="btn-cfg-preview" class="btn primary">Preview Config</button>
+      <button id="btn-cfg-create" class="btn" disabled>Create Config (sign in wallet)</button>
+      <span id="cfg-create-status" class="muted"></span>
+    </div>
+    <div id="cfg-preview-out" class="detail" hidden></div>
+    <div id="cfg-created-out" class="detail" hidden></div>
+
+    <h2>Launch — issue a token</h2>
+    <div class="grid">
+      <label>Config ID <input id="iss-config" type="number" value="25" min="1"></label>
+      <label>Token name <input id="iss-name" value="Launchpad Token"></label>
+      <label>Symbol <input id="iss-symbol" value="LPT"></label>
+      <label>Metadata URI <input id="iss-uri" class="mono" placeholder="ipfs://… or https://…"></label>
+      <label>Decimals (6–9, must match Config) <input id="iss-decimals" type="number" value="9" min="6" max="9"></label>
+    </div>
+    <div class="row">
+      <button id="btn-iss-load" class="btn">Load Config (read poolCreationFee)</button>
+      <button id="btn-iss-issue" class="btn primary" disabled>Issue token (sign in wallet)</button>
+      <span id="iss-status" class="muted"></span>
+    </div>
+    <div id="iss-out" class="detail" hidden></div>
+    <p class="muted"><span class="mono">poolCreationFee</span> is paid in native ETH as the transaction
+    value and is read from the Config — the docs example is 0, but the real value must be checked per Config.</p>
+  </section>
+
+  <section class="card" id="fees-card">
+    <h2>Fees — claimable</h2>
+    <p class="muted">The FeeVault aggregates fees across all launches for the same asset + beneficiary —
+    a claimable amount is <strong>not</strong> the revenue of one token. A zero claimable amount sends no transaction.</p>
+    <div class="row wrap">
+      <label>Config ID <input id="fee-config" type="number" value="25" min="1"></label>
+      <label>Beneficiary <input id="fee-beneficiary" class="mono" placeholder="0x… (defaults to connected wallet)"></label>
+      <label>Base token <input id="fee-base" class="mono" value="0xeFD0b74cB733534D6554894c0FdF5931a711BCFB"></label>
+      <button id="btn-fee-load" class="btn primary">Check claimable</button>
+    </div>
+    <div id="fee-out" class="detail" hidden></div>
+    <p class="muted">Demo: FeeVault for the KGPT curve is
+    <span class="mono">0x414Be4a093fDFd7292dCa95C4D6fdD3905Ee6800</span> (read from the factory — the UI always
+    reads the vault from the factory, never trusts a pasted address).</p>
+  </section>
+
+  <footer>
+    <p><strong>Testnet only.</strong> GIWA Sepolia assets have no real value. Nothing on this page
+    sends a transaction by itself — every write happens only after you click a button and confirm
+    in your own wallet. No private key or seed phrase is ever typed, stored or sent by this site.</p>
+    <p>
+      <a href="https://ammora-docs.vercel.app/guides/partner-quickstart" target="_blank" rel="noopener">Ammora docs — Partner Quickstart</a> ·
+      <a href="https://sepolia-explorer.giwa.io" target="_blank" rel="noopener">GIWA Sepolia Explorer</a> ·
+      Built with <span class="mono">@ammora-protocol/sdk 0.3.9</span> + <span class="mono">viem 2.33.0</span>
+    </p>
+  </footer>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
